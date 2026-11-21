@@ -1,0 +1,55 @@
+diff --git a/bot.py b/bot.py
+index 92ab7d0..e689366 100644
+--- a/bot.py
++++ b/bot.py
+@@ -1,4 +1,5 @@
+ import math
++import os
+ 
+ import mechfight
+ from strategy import Strategy
+@@ -51,6 +52,10 @@ class OvalRunner:
+         self.opening_cache = None
+         self.last_hp_event = -math.inf
+         self.saving_repair = False
++        self.duel_discount = float(os.environ.get("OVAL_DUEL_DISCOUNT", "0"))
++        self.zone_hold = float(os.environ.get("OVAL_ZONE_HOLD", "0"))
++        self.zone_credit = float(os.environ.get("OVAL_ZONE_CREDIT", "0"))
++        self.zone_until = -math.inf
+ 
+     def update_repair(self, obs):
+         own = obs["self"]
+@@ -235,6 +240,18 @@ class OvalRunner:
+         keep_rotating = (self.mode=="zone" and travel>3 and now>=zone["shrink_start"] and
+                          future_margin(zone,now,pos,eta*1.45+6)<buffer+6)
+         urgent = not own["in_zone"] or danger or keep_rotating
++        # Allow a small, reversible spend from the game's HP pool at a moving boundary.
++        if (self.zone_credit and not self.retreating and hp >= .65 and radius > 0 and
++                now >= zone["shrink_start"] and slack > 2 and
++                any(actor["kind"] == "mech" for actor in obs["mechs"])):
++            margin = future_margin(zone, now, pos, 1.5)
++            cost = max(0, -margin) / speed * zone["dps"]
++            if cost < self.zone_credit * own["hp"]:
++                urgent = False
++        if self.zone_hold and urgent and self.mode != "zone":
++            self.zone_until = now + self.zone_hold
++        if self.zone_hold and self.mode == "zone" and travel > 3 and now < self.zone_until:
++            urgent = True
+         self.fast_rotation = urgent and (not own["in_zone"] or slack < 8 or
+                              future_margin(zone,now,pos,eta*.8+2) < buffer)
+         hold_radius = max(0,min(radius*.62,radius-15))
+@@ -268,7 +285,13 @@ class OvalRunner:
+         if target:
+             enemy,kind,_ = target
+             if kind == "mech" and (not self.retreating or finisher):
+-                add(140 if finisher else 78, "duel",enemy["id"],enemy["pos"])
++                score = 140 if finisher else 78
++                if self.duel_discount and not finisher:
++                    disadvantage = (hp < .75 or own["cubes"] + 1 < enemy.get("cubes", 0) or
++                                    distance(pos, enemy["pos"]) > 90)
++                    if disadvantage:
++                        score -= self.duel_discount
++                add(score, "duel",enemy["id"],enemy["pos"])
+             elif kind == "npc" and not self.retreating and own["cubes"] < 10:
+                 add(64, "farm",enemy["id"],enemy["pos"])
+         bonuses = self.cube_values(obs)

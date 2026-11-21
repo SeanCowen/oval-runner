@@ -1,4 +1,5 @@
 import math
+import os
 
 import mechfight
 from strategy import Strategy
@@ -51,6 +52,7 @@ class OvalRunner:
         self.opening_cache = None
         self.last_hp_event = -math.inf
         self.saving_repair = False
+        self.zone_credit = .03 if os.environ.get("OVAL_STORM_ALLOWANCE", "1") != "0" else 0
 
     def update_repair(self, obs):
         own = obs["self"]
@@ -235,6 +237,14 @@ class OvalRunner:
         keep_rotating = (self.mode=="zone" and travel>3 and now>=zone["shrink_start"] and
                          future_margin(zone,now,pos,eta*1.45+6)<buffer+6)
         urgent = not own["in_zone"] or danger or keep_rotating
+        # Allow a small, reversible spend from the game's HP pool at a moving boundary.
+        if (self.zone_credit and not self.retreating and hp >= .65 and radius > 0 and
+                now >= zone["shrink_start"] and slack > 2 and
+                any(actor["kind"] == "mech" for actor in obs["mechs"])):
+            margin = future_margin(zone, now, pos, 1.5)
+            cost = max(0, -margin) / speed * zone["dps"]
+            if cost < self.zone_credit * own["hp"]:
+                urgent = False
         self.fast_rotation = urgent and (not own["in_zone"] or slack < 8 or
                              future_margin(zone,now,pos,eta*.8+2) < buffer)
         hold_radius = max(0,min(radius*.62,radius-15))
