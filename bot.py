@@ -1,6 +1,7 @@
 import math
 
 import mechfight
+from strategy import Strategy
 from navigation import Arena, Router, SafeRing, direction, distance
 
 
@@ -27,6 +28,7 @@ class OvalRunner:
         self.config = hello["config"]
         self.arena = arena or Arena(hello["map"]["dir"], self.config["mech"])
         self.router = Router(self.arena)
+        self.strategy = Strategy(self.config,self.arena)
         self.ring = SafeRing(self.arena) if hasattr(self.arena,"links") else None
         self.ring_route = None
         self.fast_rotation = self.sprinting = False
@@ -187,8 +189,10 @@ class OvalRunner:
         hold_radius = max(0,min(radius*.62,radius-15))
         zone_goal = advance(next_center,direction(next_center,pos),hold_radius)
         if radius == 0 and zone["radius"] < 14 and now >= zone["shrink_start"]:
+            self.strategy.sprint = False
             return ("zone",0),next_center
         if urgent:
+            self.strategy.sprint = False
             pickup = self.route_pickup(obs,travel)
             if pickup is not None:
                 return pickup
@@ -249,7 +253,7 @@ class OvalRunner:
             self.next_scan = now+15
         add(13,"explore",0,self.roam)
         _,key,goal = max(options,key=lambda item:item[0])
-        return key,goal
+        return self.strategy.pick(self,obs,options,(key,goal),nearby)
 
     def local_move(self, obs, enemy, recover):
         own, zone = obs["self"],obs["zone"]
@@ -299,6 +303,10 @@ class OvalRunner:
         if key != self.intent:
             self.router.invalidate()
         self.intent, self.mode = key,key[0]
+        if self.mode=="crates" and self.strategy.cached and self.strategy.cached[0]==key and (not target or target[0]["id"]!=key[1]):
+            selected = [item for item in obs["crates"] if item["id"]==key[1]]
+            if selected:
+                target = self.observe_target(dict(obs,mechs=[],crates=selected)) or target
         move = None
         if self.mode=="zone" and self.ring_route is not None and self.ring_route[0]>0:
             waypoint = self.ring_route[1]
@@ -328,8 +336,9 @@ class OvalRunner:
                 self.escape_until = now+.65
             self.anchor,self.anchor_time = tuple(pos),now
         escape = now < self.escape_until
-        travel_sprint = self.mode=="zone" and self.fast_rotation or self.mode=="drop" and distance(pos,goal)>25
-        self.sprinting = travel_sprint and own["energy"] > own["max_energy"]*(.36 if self.sprinting else .72)
+        travel_sprint = (self.mode=="zone" and self.fast_rotation or self.mode=="drop" and distance(pos,goal)>25
+                         or self.strategy.sprint and self.mode in ("cubes","pickups","crates") and distance(pos,goal)>7)
+        self.sprinting = travel_sprint and own["energy"] > own["max_energy"]*(.36 if self.sprinting or self.strategy.sprint else .72)
         boost = (math.hypot(*move)>.8 and (escape or (own["grounded"] and own["energy"] > 32 and
                  (self.sprinting or self.mode in ("recover","evade") or self.mode == "zone" and not own["in_zone"]))))
         self.last_move = move

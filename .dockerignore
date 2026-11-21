@@ -3,3 +3,5 @@
 !navigation.py
 !mechfight.py
 !Dockerfile
+!planner.rs
+!strategy.py

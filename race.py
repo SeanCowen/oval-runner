@@ -114,7 +114,7 @@ def run_case(arena, hello, example, policy, case):
 def compare(arena, hello, example, baseline, seed, count):
     scenarios = cases(arena,hello["config"],seed,count)
     records = []
-    for label,policy in (("3.88 baseline",baseline),("candidate",OvalRunner)):
+    for label,policy in (("supplied baseline",baseline),("candidate",OvalRunner)):
         outcomes = [run_case(arena,hello,example,policy,case) for case in scenarios]
         costs = sorted(damage for damage,_ in outcomes)
         print(f"{seed} {label}: mean zone damage {sum(costs)/count:.1f}, p90 {costs[int(.9*count)]:.1f}, "
@@ -171,7 +171,7 @@ def capture(arena,hello,example,policy,case):
 
 def supply_compare(arena,hello,example,baseline,seed,count):
     scenarios = supply_cases(arena,seed,count)
-    for label,policy in (("3.88 baseline",baseline),("candidate",OvalRunner)):
+    for label,policy in (("supplied baseline",baseline),("candidate",OvalRunner)):
         tally = sum(capture(arena,hello,example,policy,case) for case in scenarios)
         print(f"{seed} {label}: uncontested supply captures {tally}/{count} by 8 seconds after earliest capture")
 
@@ -218,7 +218,7 @@ def opening(hello,example,policy,seed,close=False):
 
 
 def opening_compare(hello,example,baseline,seed,count):
-    for label,policy in (("3.88 baseline",baseline),("candidate",OvalRunner)):
+    for label,policy in (("supplied baseline",baseline),("candidate",OvalRunner)):
         cubes = sum(opening(hello,example,policy,seed+idx) for idx in range(count))
         checks = sum(opening(hello,example,policy,seed+idx,True) for idx in range(count))
         print(f"{seed} {label}: first cube in distant-opponent opening {cubes}/{count}; "

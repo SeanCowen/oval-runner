@@ -1,6 +1,31 @@
 # Oval Runner
 
-A standard-library Python entry for the Builders Mech Royale track. The Dockerfile belongs at the repository root. The server supplies the arena at runtime; no map, credentials, training set, or network access is bundled or needed.
+A Rust strategic planner with a standard-library Python game controller for the Builders Mech Royale track. The Dockerfile belongs at the repository root. The server supplies the arena at runtime; no map, credentials, training set or runtime network access is required.
+
+## V4: five decisions ahead
+
+Instead of rating only the next resource, a bounded Rust beam search ranks sequences of up to five stops among fourteen eligible objectives. Each simulated step tracks elapsed time, energy, first-time weapon acquisition, cube thresholds and supply rewards. It compares walking to spending boost, excludes invalid repeats and missed deadlines, and prices the time needed to get back to the safe ring. It executes only the first choice and reconsiders it after about half a match-second or sooner if the objective disappears. V3 keeps control of close encounters, retreat and emergency zone movement. This is a resource planner, not a full match simulator or a complete rewrite in Rust.
+
+The compiler and Python images are pinned. Three Rust unit tests run during the build, and the runtime contains only the compiled library, Python and the controller. Running Python outside the image without the library uses V3's heuristic choice instead; use the image for V4 benchmarks.
+
+| Held-out resource benchmark, 96 paired windows (seed 40321) | V3 | One-step Rust | Five-step Rust |
+| --- | ---: | ---: | ---: |
+| Mean cubes | 7.62 | 5.86 | 8.51 |
+| Acquired a second weapon | 60 | 88 | 87 |
+| Captured a supply | 46 | 66 | 51 |
+| Reached six cubes | 81 | 53 | 89 |
+
+These short, combat-free scenarios alternate scattered and clustered loot. They do not establish tournament placement. On 64 separate storm scenarios (seed 12109), mean storm damage was unchanged at 58.1 HP and both policies captured 62/64 uncontested supplies in the separate supply test. The goal is to enter later encounters better equipped; the official run tests whether that pays off.
+
+To repeat the depth comparison, build this image as `oval-runner:v4`, set `KIT` to the kit and `BASE` to a checkout of commit `34bbb13`, then run from this folder:
+
+```sh
+docker build --platform linux/amd64 --network none -t oval-runner:v4 .
+docker run --platform linux/amd64 --rm --network none --cpus 1 --memory 512m --read-only \
+  -v "$KIT:/kit:ro" -v "$BASE:/baseline:ro" -v "$PWD/evaluate.py:/bot/evaluate.py:ro" \
+  -v "$PWD/race.py:/bot/race.py:ro" -v "$PWD/economy.py:/bot/economy.py:ro" \
+  --entrypoint python oval-runner:v4 -Bu economy.py --kit /kit --baseline /baseline --count 96 --seed 40321
+```
 
 ## How it plays
 
@@ -26,7 +51,7 @@ python3 "$KIT/check/check.py" --map-dir /arena -- docker run --platform linux/am
 
 | Check | Observed result |
 | --- | --- |
-| Official recorded checker, Linux/amd64 Docker with match limits | 300/300 in time, no stale ticks or invalid lines. Ready in 628 ms; p99 1.6 ms; max 4.6 ms on the development machine. |
+| Official recorded checker, Linux/amd64 Docker with match limits | 300/300 in time, no stale ticks or invalid lines. Ready in 551 ms; p99 1.7 ms; max 4.3 ms on the development machine. |
 | Recovery and capture scenarios | 7/7 versus 3/7 for the scored baseline on the same scripted observations. These check decisions, not placement. |
 | Policy scenarios | 12 passed; includes recovery, storm priority, final-circle holding, laser release, item reach and abandoning a stuck goal. |
 | Navigation, seed 19087 | 256/256 reachable pairs on the map-derived grid, versus 39/256 for straight-line movement. |
@@ -37,7 +62,7 @@ Neither the checker nor these scenarios measure tournament placement. The naviga
 
 ## Practice comparison
 
-Official practice: `1d9e5cb` earned 3.77 and `7f4965d` earned 3.88. V3 retains the second version's recovery and capture rules. Its official score is not yet known.
+Practice history: `1d9e5cb` earned 3.77, `7f4965d` earned 3.88, and the team reported 3.98 for `34bbb13`. V4 is a candidate; it has not been scored here.
 
 ## V3: routing to a region
 
