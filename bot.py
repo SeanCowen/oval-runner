@@ -23,6 +23,7 @@ class OvalRunner:
         self.intent = None
         self.mode = "explore"
         self.retreating = False
+        self.damage_frames = (-math.inf,-math.inf)
         self.anchor = None
         self.anchor_time = self.escape_until = -10
         self.last_target = None
@@ -34,6 +35,26 @@ class OvalRunner:
         self.progress_time = 0
         self.progress_dist = math.inf
         self.skip_until = {}
+
+    def drop_value(self, obs, drop, enemies):
+        own = obs["self"]
+        dist = distance(own["pos"],drop["pos"])
+        rules = self.config["drops"]
+        ring = drop.get("radius",rules["radius"])
+        duration = drop.get("capture_s",rules["capture_s"])
+        if drop["holder"] not in (None,own["id"]) or dist > 135:
+            return None
+        arrival = max(0,dist-ring)/own["stats"]["walk_speed"]
+        if drop["lands_in"] > arrival+4:
+            return None
+        banked = drop.get("progress",0) if drop["holder"] == own["id"] and dist <= ring else 0
+        finish_in = max(arrival,drop["lands_in"])+max(0,duration-banked)
+        enemy_gap = min((distance(enemy["pos"],drop["pos"])-ring for enemy in enemies),default=math.inf)
+        contest_in = enemy_gap / self.config["mech"]["boost_speed"]
+        if contest_in <= finish_in+.3:
+            return None
+        health_missing = 1-own["hp"]/own["max_hp"]
+        return 110+48*health_missing-.5*dist+40*banked/duration
 
     def observe_target(self, obs):
         own = obs["self"]
@@ -101,10 +122,10 @@ class OvalRunner:
                     target[0].get("hp",math.inf) <= own["weapons"][0]["stats"]["damage"]*1.8)
         if nearby and not finisher and (self.retreating or count >= 2) and distance(pos,nearby[0]["pos"]) < 110:
             away = direction(nearby[0]["pos"],pos)
-            add(139, "recover",0,advance(pos,away,25))
+            add(139, "recover" if self.retreating else "evade",0,advance(pos,away,25))
         if target:
             enemy,kind,_ = target
-            if kind == "mech" and (distance(pos,enemy["pos"]) < 190 or not self.retreating):
+            if kind == "mech" and (not self.retreating or finisher):
                 add(140 if finisher else 78, "duel",enemy["id"],enemy["pos"])
             elif kind == "npc" and not self.retreating and own["cubes"] < 10:
                 add(64, "farm",enemy["id"],enemy["pos"])
@@ -129,12 +150,9 @@ class OvalRunner:
                 value = 62
             add(value-dist*.65,group,item["id"],point)
         for drop in obs["drops"]:
-            dist = distance(pos,drop["pos"])
-            if drop["holder"] not in (None,own["id"]) or count or dist > 135:
-                continue
-            if drop["lands_in"] > dist/speed+4:
-                continue
-            add(110+48*(1-hp)-.5*dist,"drop",drop["id"],drop["pos"])
+            value = self.drop_value(obs,drop,nearby)
+            if value is not None:
+                add(value,"drop",drop["id"],drop["pos"])
         if self.roam is None or distance(pos,self.roam) < 10 or now > self.next_scan:
             self.roam_index += 1
             bearing = self.phase + self.roam_index*2.4
@@ -178,6 +196,9 @@ class OvalRunner:
         self.remember(obs)
         own, pos = obs["self"],obs["self"]["pos"]
         now = obs["t"]
+        if any(event.get("type") == "damaged" and event.get("by") is not None and
+               event.get("weapon") != "zone" for event in obs["events"]) and now > self.damage_frames[1]:
+            self.damage_frames = self.damage_frames[1],now
         target = self.observe_target(obs)
         key,goal = self.choose(obs,target)
         goal_dist = distance(pos,goal)
@@ -191,7 +212,7 @@ class OvalRunner:
             self.router.invalidate()
         self.intent, self.mode = key,key[0]
         move = None
-        if self.mode == "recover":
+        if self.mode in ("recover","evade"):
             enemy = min((actor for actor in obs["mechs"] if actor["kind"]=="mech"),key=lambda actor:distance(pos,actor["pos"]))
             move = self.local_move(obs,enemy,True)
         elif self.mode == "duel" and target and distance(pos,target[0]["pos"]) < 115:
@@ -210,7 +231,7 @@ class OvalRunner:
             self.anchor,self.anchor_time = tuple(pos),now
         escape = now < self.escape_until
         boost = (escape or (own["grounded"] and own["energy"] > 32 and
-                 (self.mode == "recover" or self.mode == "zone" and not own["in_zone"])))
+                 (self.mode in ("recover","evade") or self.mode == "zone" and not own["in_zone"])))
         self.last_move = move
         action = {"move":list(move),"boost":bool(boost and any(move)),"jump":escape and own["grounded"],"fire":[False,False]}
         guns = own["weapons"]
@@ -220,8 +241,9 @@ class OvalRunner:
             dist = distance(pos,end)
             secondary = guns[1]
             laser = secondary and secondary["kind"] == "laser"
-            use_beam = laser and secondary["cooldown"] <= .1 and self.mode not in ("zone","recover")
-            fire_ok = self.mode != "recover" and (not self.retreating or kind == "mech")
+            use_beam = laser and secondary["cooldown"] <= .1 and self.mode not in ("zone","recover","evade")
+            recent_pressure = now-self.damage_frames[0] <= 1.5 and now-self.damage_frames[1] <= .35
+            fire_ok = not self.retreating or kind == "mech" and (self.mode == "duel" or recent_pressure)
             if fire_ok and not use_beam and guns[0] and guns[0]["kind"] == "gun":
                 frames = min(.75,dist/max(1,guns[0]["stats"]["speed"]))
                 vel = enemy.get("vel",(0,0,0))

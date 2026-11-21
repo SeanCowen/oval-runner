@@ -26,7 +26,8 @@ python3 "$KIT/check/check.py" --map-dir /arena -- docker run --platform linux/am
 
 | Check | Observed result |
 | --- | --- |
-| Official recorded checker, Linux/amd64 Docker with match limits | 300/300 in time, no stale ticks or invalid lines. Ready in 554 ms; p99 1.2 ms; max 3.3 ms on the development machine. |
+| Official recorded checker, Linux/amd64 Docker with match limits | 300/300 in time, no stale ticks or invalid lines. Ready in 579 ms; p99 1.2 ms; max 3.4 ms on the development machine. |
+| Recovery and capture scenarios | 7/7 versus 3/7 for the scored baseline on the same scripted observations. These check decisions, not placement. |
 | Policy scenarios | 12 passed; includes recovery, storm priority, final-circle holding, laser release, item reach and abandoning a stuck goal. |
 | Navigation, seed 19087 | 256/256 reachable pairs on the map-derived grid, versus 39/256 for straight-line movement. |
 | Zone re-entry, seed 19087 | The full policy entered 64/64 stationary test circles. Uses simplified movement, without enemies, health loss or a moving zone. |
@@ -34,9 +35,9 @@ python3 "$KIT/check/check.py" --map-dir /arena -- docker run --platform linux/am
 
 Neither the checker nor these scenarios measure tournament placement. The navigation harness uses the same approximate grid as the planner. The duel harness includes approximate movement, game aim, spread, ammo and regeneration; it omits cover, real house-bot logic, special weapons, upgrades, and other players. Its role is to detect control mistakes, not estimate a real win rate.
 
-## First official practice run
+## Practice comparison
 
-Push this folder's **contents** to a public GitHub repository and submit its URL on the Mech Royale track page. Keep the scored commit available. Start by recording its mean placement points as the baseline. For the next version, change one thing based on the most frequent observable failure: routing for missed circles, recovery thresholds for prolonged losing duels, or item valuation for weak late-game starts. The kit's local replay cannot supply this feedback.
+Baseline commit `1d9e5cb` earned 3.77 official mean placement points over 48 matches. This candidate changes recovery and supply decisions, not pathfinding or weapon tuning. A healthy mech can keep playing while backing away from multiple opponents. An injured mech no longer chases a distant opponent while trying to regenerate; under repeated incoming damage it can respond briefly without letting its own hits renew that window. A supply drop is scored using its remaining capture time and the earliest a known enemy could reach the ring, rather than a blanket exclusion for enemies near the bot. The official practice result, not the scripted checks, is the acceptance metric.
 
 ## Credits
 

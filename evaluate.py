@@ -141,6 +141,49 @@ def route_checks(arena, count, seed):
     return results
 
 
+def pressure_checks(hello, example, policy=OvalRunner):
+    def fixture(hp, enemies, supply=None):
+        obs = copy.deepcopy(example)
+        obs["self"].update(pos=[0,0,0],hp=hp,aim=[0,0])
+        obs["zone"].update(center=[0,0],radius=180,next_center=[0,0],next_radius=100)
+        obs["mechs"] = [{"kind":"mech","id":10+index,"pos":[dist,0,0],"vel":[0,0,0],"hp":1400,
+                         "max_hp":1400} for index,dist in enumerate(enemies)]
+        if supply is not None:
+            obs["drops"] = [{"id":20000,"holder":obs["self"]["id"],"lands_in":0,"progress":supply,
+                             "radius":8,"capture_s":4,"pos":[0,0,0]}]
+        bot = policy(hello,FlatArena())
+        bot.router.waypoint = lambda pos,goal:goal
+        return bot,obs
+
+    results = {}
+    bot,obs = fixture(1400,[55,80])
+    action = bot.act(obs)
+    results["healthy outnumbered mech moves away without switching its gun off"] = action["move"][0]<0 and action["fire"][0]
+    bot,obs = fixture(350,[125])
+    action = bot.act(obs)
+    results["injured mech does not pursue and reset its healing timer"] = bot.mode!="duel" and not any(action["fire"])
+    bot,obs = fixture(420,[45],3.2)
+    action = bot.act(obs)
+    results["keeps an uncontested capture with 0.8 seconds remaining"] = bot.mode=="drop" and not any(action["move"])
+    bot,obs = fixture(420,[11],2.0)
+    bot.act(obs)
+    results["does not commit to a ring an opponent can contest first"] = bot.mode!="drop"
+    bot,obs = fixture(320,[45])
+    for moment in (1,1.4):
+        obs.update(t=moment,tick=round(moment*20),events=[{"type":"damaged","by":10,"weapon":"gun","amount":45}])
+        action = bot.act(obs)
+    results["can return fire during repeated incoming damage"] = action["fire"][0] and bot.mode=="recover"
+    obs.update(t=2.2,tick=44,events=[])
+    action = bot.act(obs)
+    results["gun goes quiet again when pressure stops"] = not any(action["fire"])
+    bot,obs = fixture(320,[45])
+    for moment in (1,1.4):
+        obs.update(t=moment,events=[{"type":"hit","target":10,"amount":45}])
+        action = bot.act(obs)
+    results["own hits cannot self-renew the return-fire window"] = not any(action["fire"])
+    return results
+
+
 def zone_checks(arena, hello, example, count, seed):
     rng = random.Random(seed)
     largest = Counter(key for key in arena.region if key >= 0).most_common(1)[0][0]
@@ -269,6 +312,9 @@ def main():
         hello,example = json.loads(next(stream)),json.loads(next(stream))
     passed = policy_checks(hello,example)
     print(f"Policy scenarios: {len(passed)} passed")
+    pressure = pressure_checks(hello,example)
+    assert all(pressure.values()), [case for case,passed in pressure.items() if not passed]
+    print(f"Pressure and capture regressions: {len(pressure)} passed")
     arena = Arena(args.kit/"arena",hello["config"]["mech"])
     results = route_checks(arena,args.routes,args.seed)
     reentered = zone_checks(arena,hello,example,args.zones,args.seed)
