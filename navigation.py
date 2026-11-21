@@ -179,6 +179,81 @@ class Arena:
         return True
 
 
+class SafeRing:
+    def __init__(self, arena):
+        self.arena = arena
+        self.key = None
+
+    def reset(self, center, radius, region):
+        arena = self.arena
+        self.key = (*center,radius,region)
+        self.radius = max(0,radius-min(28,max(6,.18*radius)))
+        self.center = tuple(center)
+        total = len(arena.walk)
+        self.cost = array("i",[-1])*total
+        self.successor = array("i",[-1])*total
+        self.settled = bytearray(total)
+        self.frontier = []
+        edge = max(0,self.radius-2*arena.step)
+        for row in range(max(0,math.ceil((center[1]-self.radius-arena.bottom)/arena.step)),
+                         min(arena.rows,1+math.floor((center[1]+self.radius-arena.bottom)/arena.step))):
+            dy = arena.bottom+row*arena.step-center[1]
+            outer = math.sqrt(max(0,self.radius**2-dy**2))
+            inner = math.sqrt(max(0,edge**2-dy**2))
+            spans = ((-outer,-inner),(inner,outer)) if inner else ((-outer,outer),)
+            for left,right in spans:
+                first = max(0,math.ceil((center[0]+left-arena.left)/arena.step))
+                last = min(arena.cols-1,math.floor((center[0]+right-arena.left)/arena.step))
+                for col in range(first,last+1):
+                    node = row*arena.cols+col
+                    if arena.region[node] == region and self.cost[node] < 0:
+                        self.cost[node] = 0
+                        self.frontier.append((0,node))
+        if not self.frontier:
+            node = arena.snap(center,region)
+            if node is not None:
+                self.cost[node] = 0
+                self.frontier.append((0,node))
+        heapq.heapify(self.frontier)
+
+    def route(self, pos, center, radius):
+        arena = self.arena
+        node = arena.snap(pos)
+        if node is None:
+            return None
+        key = (*center,radius,arena.region[node])
+        if key != self.key:
+            self.reset(center,radius,arena.region[node])
+        if distance(pos,center) <= self.radius:
+            return 0.0,pos
+        for _ in range(550):
+            if self.settled[node] or not self.frontier:
+                break
+            cost,current = heapq.heappop(self.frontier)
+            if self.settled[current] or self.cost[current] != cost:
+                continue
+            self.settled[current] = 1
+            for neighbour,weight in arena.links[current]:
+                candidate = cost+weight
+                if self.cost[neighbour] < 0 or candidate < self.cost[neighbour]:
+                    self.cost[neighbour] = candidate
+                    self.successor[neighbour] = current
+                    heapq.heappush(self.frontier,(candidate,neighbour))
+        if not self.settled[node]:
+            return None
+        travel = self.cost[node]*arena.step/10
+        waypoint = arena.point(node)
+        if node == arena.cell(pos):
+            if self.successor[node] < 0 and arena.clear(pos,center) and distance(pos,center)<arena.step*2:
+                return distance(pos,center),center
+            for _ in range(7):
+                node = self.successor[node]
+                if node < 0 or not arena.clear(pos,arena.point(node)):
+                    break
+                waypoint = arena.point(node)
+        return travel+distance(pos,arena.point(arena.cell(pos))),waypoint
+
+
 class Router:
     def __init__(self, arena):
         self.arena = arena

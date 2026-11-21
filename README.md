@@ -26,7 +26,7 @@ python3 "$KIT/check/check.py" --map-dir /arena -- docker run --platform linux/am
 
 | Check | Observed result |
 | --- | --- |
-| Official recorded checker, Linux/amd64 Docker with match limits | 300/300 in time, no stale ticks or invalid lines. Ready in 579 ms; p99 1.2 ms; max 3.4 ms on the development machine. |
+| Official recorded checker, Linux/amd64 Docker with match limits | 300/300 in time, no stale ticks or invalid lines. Ready in 628 ms; p99 1.6 ms; max 4.6 ms on the development machine. |
 | Recovery and capture scenarios | 7/7 versus 3/7 for the scored baseline on the same scripted observations. These check decisions, not placement. |
 | Policy scenarios | 12 passed; includes recovery, storm priority, final-circle holding, laser release, item reach and abandoning a stuck goal. |
 | Navigation, seed 19087 | 256/256 reachable pairs on the map-derived grid, versus 39/256 for straight-line movement. |
@@ -37,7 +37,28 @@ Neither the checker nor these scenarios measure tournament placement. The naviga
 
 ## Practice comparison
 
-Baseline commit `1d9e5cb` earned 3.77 official mean placement points over 48 matches. This candidate changes recovery and supply decisions, not pathfinding or weapon tuning. A healthy mech can keep playing while backing away from multiple opponents. An injured mech no longer chases a distant opponent while trying to regenerate; under repeated incoming damage it can respond briefly without letting its own hits renew that window. A supply drop is scored using its remaining capture time and the earliest a known enemy could reach the ring, rather than a blanket exclusion for enemies near the bot. The official practice result, not the scripted checks, is the acceptance metric.
+Official practice: `1d9e5cb` earned 3.77 and `7f4965d` earned 3.88. V3 retains the second version's recovery and capture rules. Its official score is not yet known.
+
+## V3: routing to a region
+
+The published next circle is a set of valid destinations. A reverse multi-source Dijkstra search starts from walkable cells along a buffered inner boundary in the mech's connected component. As the mech moves, it can reuse the cost-to-safety and downhill directions rather than repeatedly selecting an arbitrary geometric point. Each decision performs at most 550 queue pops. Until the field reaches the mech it falls back to the existing point-to-point planner. The policy forecasts the boundary at the estimated arrival time, allows short cube detours when time permits, and slows down near the final center rather than repeatedly overshooting it.
+
+The same version looks farther ahead for announced supply drops when they are reachable before a rival. During the opening it favors clustered cubes and nearby crates when underpowered, healthy, and not under immediate pressure. No new weapons or map-specific locations are hard-coded.
+
+### Offline comparison against 3.88
+
+Check out `7f4965d` in another folder. Run `python3 -B race.py --kit "$KIT" --baseline /path/to/baseline --cases 96 --seed 61783`. Both policies receive the same starts, phase parameters, loot and terrain. This is a stress test for movement and resource decisions, not the house-bot simulator.
+
+| Seed 61783, 96 paired scenarios per test | 3.88 policy | V3 |
+| --- | ---: | ---: |
+| Mean storm damage during one moving-circle phase | 335.6 | 149.7 |
+| No storm damage | 73 | 87 |
+| Cubes collected in the storm test | 484 | 409 |
+| Uncontested supply captured within 8 s of earliest possible capture | 88 | 94 |
+| First cube collected within 12 s with a distant, non-attacking observer and a nearby crate | 0 | 96 |
+| Chooses a duel instead when the observer is replaced by a nearby opponent | 96 | 96 |
+
+The moving-circle model includes acceleration, boost energy, collision with the navigation grid, and bait cubes placed around the start. It counts uncapped zone damage and omits combat, jets, roofs and regeneration. V3 trades some of those starting cubes for earlier safety. Supply races are uncontested; opening tests isolate one decision and do not model damage from the observer. Only an official run can establish a placement gain.
 
 ## Credits
 

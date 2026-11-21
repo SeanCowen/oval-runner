@@ -1,7 +1,7 @@
 import math
 
 import mechfight
-from navigation import Arena, Router, direction, distance
+from navigation import Arena, Router, SafeRing, direction, distance
 
 
 def angle_diff(first, second):
@@ -12,6 +12,14 @@ def advance(point, vector, length):
     return point[0]+vector[0]*length, point[1]+vector[1]*length
 
 
+def future_margin(zone, now, point, delay):
+    start = max(now,zone["shrink_start"])
+    fraction = min(1,max(0,(now+delay-start)/max(.001,zone["shrink_end"]-start)))
+    center = [origin+(dest-origin)*fraction for origin,dest in zip(zone["center"],zone["next_center"])]
+    radius = zone["radius"]+(zone["next_radius"]-zone["radius"])*fraction
+    return radius-distance(point,center)
+
+
 class OvalRunner:
     name = "Oval Runner"
 
@@ -19,6 +27,9 @@ class OvalRunner:
         self.config = hello["config"]
         self.arena = arena or Arena(hello["map"]["dir"], self.config["mech"])
         self.router = Router(self.arena)
+        self.ring = SafeRing(self.arena) if hasattr(self.arena,"links") else None
+        self.ring_route = None
+        self.fast_rotation = self.sprinting = False
         self.phase = (hello["seed"] % 997) * math.tau / 997
         self.intent = None
         self.mode = "explore"
@@ -35,6 +46,7 @@ class OvalRunner:
         self.progress_time = 0
         self.progress_dist = math.inf
         self.skip_until = {}
+        self.opening_cache = None
 
     def drop_value(self, obs, drop, enemies):
         own = obs["self"]
@@ -42,25 +54,65 @@ class OvalRunner:
         rules = self.config["drops"]
         ring = drop.get("radius",rules["radius"])
         duration = drop.get("capture_s",rules["capture_s"])
-        if drop["holder"] not in (None,own["id"]) or dist > 135:
+        if drop["holder"] not in (None,own["id"]):
             return None
         arrival = max(0,dist-ring)/own["stats"]["walk_speed"]
+        if dist > 32 and not self.arena.clear(own["pos"],drop["pos"]):
+            arrival *= 1.45
+        if arrival > self.config["drops"]["fall_s"]+3:
+            return None
         if drop["lands_in"] > arrival+4:
             return None
         banked = drop.get("progress",0) if drop["holder"] == own["id"] and dist <= ring else 0
         finish_in = max(arrival,drop["lands_in"])+max(0,duration-banked)
+        if future_margin(obs["zone"],obs["t"],drop["pos"],finish_in) < -ring*.3:
+            return None
         enemy_gap = min((distance(enemy["pos"],drop["pos"])-ring for enemy in enemies),default=math.inf)
         contest_in = enemy_gap / self.config["mech"]["boost_speed"]
         if contest_in <= finish_in+.3:
             return None
         health_missing = 1-own["hp"]/own["max_hp"]
-        return 110+48*health_missing-.5*dist+40*banked/duration
+        return 110+48*health_missing-.5*min(dist,95)-.18*max(0,dist-95)+40*banked/duration
+
+    def route_pickup(self, obs, travel):
+        own, zone, now = obs["self"],obs["zone"],obs["t"]
+        pos, speed = own["pos"],own["stats"]["walk_speed"]
+        if not own["in_zone"] or self.ring_route is None or travel < 10 or not self.ring:
+            return None
+        choices = []
+        for group in ("cubes","pickups"):
+            for item in obs[group]:
+                if group=="pickups" and (own["weapons"][1] or item["kind"] not in ("laser","lightning")):
+                    continue
+                point = item["pos"]
+                dist = distance(pos,point)
+                if dist>32 or abs(point[2]-pos[2])>4 or now < self.skip_until.get(item["id"],0):
+                    continue
+                node = self.arena.cell(point)
+                if not self.arena.clear(pos,point):
+                    continue
+                remaining = self.ring.cost[node]*self.arena.step/10 if self.ring.settled[node] else travel+dist
+                detour = max(0,dist+remaining-travel)
+                spare = zone["shrink_end"]-now-travel*1.18/speed-3
+                if detour>min(42,spare*speed*.45) or zone["shrink_end"]-now < (dist+remaining)*1.18/speed+3:
+                    continue
+                if future_margin(zone,now,point,dist/speed+2.5) < 5:
+                    continue
+                choices.append((detour+.3*dist,(group,item["id"]),point))
+        if choices:
+            _,key,goal = min(choices,key=lambda choice:choice[0])
+            return key,goal
+        return None
 
     def observe_target(self, obs):
         own = obs["self"]
         pos = own["pos"]
         origin = (*pos[:2], pos[2]+own["stats"]["muzzle_height"])
         rated = []
+        farming_window = (own["cubes"]<3 and not own["weapons"][1] and own["hp"]>.65*own["max_hp"]
+                          and obs["t"]-self.damage_frames[1]>2.5 and own["in_zone"] and
+                          not any(actor["kind"]=="mech" and distance(pos,actor["pos"])<112 for actor in obs["mechs"]))
+        self.opening_cache = None
         for obj in obs["mechs"] + obs["crates"]:
             kind = obj.get("kind","crate")
             dist = distance(pos,obj["pos"])
@@ -69,6 +121,8 @@ class OvalRunner:
             rating = {"mech":155,"npc":85,"crate":54}[kind] - dist*.46
             rating += 20*(1-obj.get("hp",1)/max(1,obj.get("max_hp",obj.get("hp",1))))
             rating += 8*(self.last_target == obj["id"]) + 8*bool(obj.get("charging"))
+            if farming_window and kind=="crate" and dist<46 and abs(pos[2]-obj["pos"][2])<4:
+                rating += 86
             rated.append((rating, obj, kind))
         for _, obj, kind in sorted(rated,key=lambda item:-item[0])[:6]:
             size = 1 + obj.get("cubes",0)*self.config["cubes"]["size_per_cube"]
@@ -76,6 +130,8 @@ class OvalRunner:
                       "crate":self.config["crates"]["height"]}[kind]
             end = (*obj["pos"][:2], obj["pos"][2] + height*.55)
             if self.arena.visible(origin,end):
+                if farming_window and kind=="crate":
+                    self.opening_cache = obj["id"]
                 return obj,kind,end
         return None
 
@@ -90,6 +146,24 @@ class OvalRunner:
             if ident not in visible and (now-seen > 4.5 or distance(pos,item["pos"]) < 8):
                 del self.loot_memory[ident]
 
+    def cube_values(self, obs):
+        cubes = obs["cubes"]
+        if len(cubes)<2 or obs["self"]["cubes"]>=self.config["cubes"]["stat_cap"]:
+            return {}
+        buckets = {}
+        for cube in cubes:
+            east,north,height = cube["pos"]
+            key = math.floor(east/10),math.floor(north/10),math.floor(height/4)
+            buckets[key] = buckets.get(key,0)+1
+        values = {}
+        for cube in cubes:
+            east,north,height = cube["pos"]
+            col,row,level = math.floor(east/10),math.floor(north/10),math.floor(height/4)
+            count = buckets[col,row,level]-1
+            adjacent = sum(buckets.get((col+dx,row+dy,level),0) for dx,dy in ((1,0),(-1,0),(0,1),(0,-1)))
+            values[cube["id"]] = min(26,8*count+3*adjacent)
+        return values
+
     def choose(self, obs, target):
         own, zone, now = obs["self"], obs["zone"], obs["t"]
         pos, next_center = own["pos"], zone["next_center"]
@@ -99,12 +173,25 @@ class OvalRunner:
         to_next = distance(pos,next_center)
         excess = max(0,to_next-max(0,radius-8))
         speed = own["stats"]["walk_speed"]
-        urgent = not own["in_zone"] or (excess > 0 and zone["shrink_end"]-now < 6 + 1.9*excess/speed)
+        self.ring_route = self.ring.route(pos,next_center,radius) if self.ring else None
+        travel = self.ring_route[0] if self.ring_route is not None else 1.55*excess
+        eta = travel/speed
+        slack = zone["shrink_end"]-now-eta
+        buffer = min(10, max(3, radius*.12))
+        danger = travel > 2 and (slack < 4 or future_margin(zone,now,pos,eta*1.25+3) < buffer)
+        keep_rotating = (self.mode=="zone" and travel>3 and now>=zone["shrink_start"] and
+                         future_margin(zone,now,pos,eta*1.45+6)<buffer+6)
+        urgent = not own["in_zone"] or danger or keep_rotating
+        self.fast_rotation = urgent and (not own["in_zone"] or slack < 8 or
+                             future_margin(zone,now,pos,eta*.8+2) < buffer)
         hold_radius = max(0,min(radius*.62,radius-15))
         zone_goal = advance(next_center,direction(next_center,pos),hold_radius)
         if radius == 0 and zone["radius"] < 14 and now >= zone["shrink_start"]:
             return ("zone",0),next_center
         if urgent:
+            pickup = self.route_pickup(obs,travel)
+            if pickup is not None:
+                return pickup
             return ("zone",0),zone_goal
         enemies = [actor for actor in obs["mechs"] if actor["kind"] == "mech"]
         nearby = sorted(enemies,key=lambda actor:distance(pos,actor["pos"]))
@@ -129,6 +216,7 @@ class OvalRunner:
                 add(140 if finisher else 78, "duel",enemy["id"],enemy["pos"])
             elif kind == "npc" and not self.retreating and own["cubes"] < 10:
                 add(64, "farm",enemy["id"],enemy["pos"])
+        bonuses = self.cube_values(obs)
         for group,item,_ in self.loot_memory.values():
             if now < self.skip_until.get(item["id"],0):
                 continue
@@ -143,11 +231,11 @@ class OvalRunner:
                     continue
                 value = 106 if item["kind"] == "lightning" else 101
             elif group == "cubes":
-                value = 108 if own["cubes"] < 10 else 72
+                value = 108+bonuses.get(item["id"],0) if own["cubes"] < self.config["cubes"]["stat_cap"] else 72
             else:
                 if self.retreating or own["cubes"] >= 10:
                     continue
-                value = 62
+                value = 92 if item["id"]==self.opening_cache else 62
             add(value-dist*.65,group,item["id"],point)
         for drop in obs["drops"]:
             value = self.drop_value(obs,drop,nearby)
@@ -212,6 +300,9 @@ class OvalRunner:
             self.router.invalidate()
         self.intent, self.mode = key,key[0]
         move = None
+        if self.mode=="zone" and self.ring_route is not None and self.ring_route[0]>0:
+            waypoint = self.ring_route[1]
+            move = direction(pos,waypoint) if distance(pos,waypoint)>.25 else (0,0)
         if self.mode in ("recover","evade"):
             enemy = min((actor for actor in obs["mechs"] if actor["kind"]=="mech"),key=lambda actor:distance(pos,actor["pos"]))
             move = self.local_move(obs,enemy,True)
@@ -224,14 +315,23 @@ class OvalRunner:
         if move is None:
             waypoint = self.router.waypoint(pos,goal)
             move = direction(pos,waypoint) if distance(pos,waypoint) > .5 else (0,0)
+        if (self.mode=="zone" and obs["zone"]["next_radius"]==0 and
+                distance(pos,obs["zone"]["next_center"])<5 and self.arena.clear(pos,obs["zone"]["next_center"])):
+            center = obs["zone"]["next_center"]
+            gap = distance(pos,center)
+            scale = min(1,5*gap/own["stats"]["walk_speed"])
+            move = tuple(value*scale for value in direction(pos,center))
+            self.fast_rotation = False
         if now-self.anchor_time >= 1.25:
             if self.anchor and distance(self.anchor,pos) < 2.5 and any(self.last_move) and any(move) and distance(pos,goal) > 8:
                 self.router.invalidate()
                 self.escape_until = now+.65
             self.anchor,self.anchor_time = tuple(pos),now
         escape = now < self.escape_until
-        boost = (escape or (own["grounded"] and own["energy"] > 32 and
-                 (self.mode in ("recover","evade") or self.mode == "zone" and not own["in_zone"])))
+        travel_sprint = self.mode=="zone" and self.fast_rotation or self.mode=="drop" and distance(pos,goal)>25
+        self.sprinting = travel_sprint and own["energy"] > own["max_energy"]*(.36 if self.sprinting else .72)
+        boost = (math.hypot(*move)>.8 and (escape or (own["grounded"] and own["energy"] > 32 and
+                 (self.sprinting or self.mode in ("recover","evade") or self.mode == "zone" and not own["in_zone"]))))
         self.last_move = move
         action = {"move":list(move),"boost":bool(boost and any(move)),"jump":escape and own["grounded"],"fire":[False,False]}
         guns = own["weapons"]
