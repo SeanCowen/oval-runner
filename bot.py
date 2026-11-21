@@ -49,6 +49,55 @@ class OvalRunner:
         self.progress_dist = math.inf
         self.skip_until = {}
         self.opening_cache = None
+        self.last_hp_event = -math.inf
+        self.saving_repair = False
+
+    def update_repair(self, obs):
+        own = obs["self"]
+        now = obs["t"]
+        if any(event["type"] in ("damaged", "hit") for event in obs["events"]):
+            self.last_hp_event = now
+        fraction = own["hp"] / own["max_hp"]
+        if not own["in_zone"] or fraction >= .86:
+            self.saving_repair = False
+        elif fraction <= .72:
+            self.saving_repair = True
+        elif now - self.last_hp_event >= own["stats"]["regen_delay"] and fraction <= .82:
+            self.saving_repair = True
+
+    def defer_crate(self, obs, crate):
+        if not self.saving_repair:
+            return False
+        own = obs["self"]
+        gun = own["weapons"][0]
+        rules = self.config["cubes"]
+        if not gun or gun["kind"] != "gun" or own["cubes"] >= rules["stat_cap"]:
+            return True
+        stats = gun["stats"]
+        hits = math.ceil(crate.get("hp", self.config["crates"]["hp"]) / max(1, stats["damage"]))
+        service = max(0, hits - 1) * stats["cooldown"] + gun["cooldown"]
+        if gun.get("reload") or hits > gun["ammo"]:
+            service += gun.get("reload") or stats["reload"]
+        timer = min(own["stats"]["regen_delay"], obs["t"] - self.last_hp_event)
+        repair_cost = (timer + service) * own["stats"]["regen_per_s"]
+        # Value the immediate cube heal, permanent stats, and the next guaranteed offer.
+        cube_health = own["max_hp"] * rules["hp_per_cube"] / (1 + own["cubes"] * rules["hp_per_cube"])
+        cube_value = cube_health * (2.5 if own["cubes"] < 3 else 1.8)
+        if own["cubes"] + 1 in rules["upgrade_thresholds"]:
+            cube_value += 2 * cube_health
+        return repair_cost > cube_value
+
+    def pick_upgrade(self, obs):
+        own = obs["self"]
+        order = ["plating","gun_mag","armor","gun_damage","nanites","lightning_range","gun_rate","laser_damage",
+                 "servos","laser_charge","lightning_efficiency","gun_velocity","reactor","gyros","jets","sensors"]
+        missing = own["max_hp"] - own["hp"]
+        # A short quiet interval can be worth more than extra capacity while wounded.
+        if self.retreating or (own["in_zone"] and missing >= .23 * own["max_hp"]):
+            order.insert(0,"nanites")
+        choices = obs["offer"]["choices"]
+        return min(range(len(choices)), key=lambda index: order.index(choices[index]["id"])
+                   if choices[index]["id"] in order else len(order))
 
     def drop_value(self, obs, drop, enemies):
         own = obs["self"]
@@ -117,6 +166,8 @@ class OvalRunner:
         self.opening_cache = None
         for obj in obs["mechs"] + obs["crates"]:
             kind = obj.get("kind","crate")
+            if kind == "crate" and self.defer_crate(obs, obj):
+                continue
             dist = distance(pos,obj["pos"])
             if kind != "mech" and dist > (65 if kind == "npc" else 95):
                 continue
@@ -237,7 +288,7 @@ class OvalRunner:
             elif group == "cubes":
                 value = 108+bonuses.get(item["id"],0) if own["cubes"] < self.config["cubes"]["stat_cap"] else 72
             else:
-                if self.retreating or own["cubes"] >= 10:
+                if self.retreating or own["cubes"] >= 10 or self.defer_crate(obs, item):
                     continue
                 value = 92 if item["id"]==self.opening_cache else 62
             add(value-dist*.65,group,item["id"],point)
@@ -285,6 +336,7 @@ class OvalRunner:
         return max(choices,key=lambda item:item[0])[1] if choices else None
 
     def act(self, obs):
+        self.update_repair(obs)
         self.remember(obs)
         own, pos = obs["self"],obs["self"]["pos"]
         now = obs["t"]
@@ -388,12 +440,7 @@ class OvalRunner:
             if reachable:
                 action["take"] = max(reachable,key=lambda item:item["kind"]=="lightning")["id"]
         if obs.get("offer"):
-            order = ["plating","gun_mag","armor","gun_damage","nanites","lightning_range","gun_rate","laser_damage",
-                     "servos","laser_charge","lightning_efficiency","gun_velocity","reactor","gyros","jets","sensors"]
-            if self.retreating:
-                order.insert(0,"nanites")
-            options = obs["offer"]["choices"]
-            action["pick"] = min(range(len(options)),key=lambda idx:order.index(options[idx]["id"]) if options[idx]["id"] in order else 99)
+            action["pick"] = self.pick_upgrade(obs)
         return action
 
 

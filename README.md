@@ -2,6 +2,32 @@
 
 A Rust strategic planner with a standard-library Python game controller for the Builders Mech Royale track. The Dockerfile belongs at the repository root. The server supplies the arena at runtime; no map, credentials, training set or runtime network access is required.
 
+## V5 repair decisions
+
+A crate hit restarts the same repair timer as incoming damage. While wounded and inside the zone, V5 estimates the HP it would give up by opening a visible crate. It uses the current repair delay and rate, the remaining crate HP, the magazine and the reload time. It compares that cost with the cube's immediate heal, permanent stats and proximity to the next upgrade offer. A nearly open crate can still be worth finishing right after a hit. Loose cubes and supplies remain available during repair. When wounded, the bot also gives the nanites offer higher priority.
+
+| Scripted six-wave test | V4 survived | V5 survived | V4 mean cubes | V5 mean cubes |
+| --- | ---: | ---: | ---: | ---: |
+| Light damage, long gaps | 192/192 | 192/192 | 9.43 | 8.28 |
+| Mixed gaps | 73/192 | 97/192 | 2.96 | 2.83 |
+| Short gaps | 31/192 | 47/192 | 2.68 | 2.32 |
+
+Each pair receives the same incoming damage and the same time-limited crates. The test holds position fixed, immediately credits an opened crate's cube, and omits opponents' decisions and secondary equipment. It uses two seeds and two assumptions about plating. The official game awards points for placement among 16 mechs.
+
+Build both the scored commit `b845d48` and this version as `oval-runner:v4` and `oval-runner:v5`, respectively. Run the following from the V5 checkout with `KIT` pointing to the original kit.
+
+```sh
+for tag in v4 v5; do
+  for seed in 33851 80669; do
+    fill=""
+    if [ "$seed" = 80669 ]; then fill="--plating-fills"; fi
+    docker run --platform linux/amd64 --rm --network none --read-only --cpus 1 --memory 512m \
+      -v "$KIT:/kit:ro" -v "$PWD/repair_eval.py:/bot/repair_eval.py:ro" \
+      --entrypoint python "oval-runner:$tag" -Bu repair_eval.py --kit /kit --count 96 --seed "$seed" $fill
+  done
+done
+```
+
 ## V4: five decisions ahead
 
 Instead of rating only the next resource, a bounded Rust beam search ranks sequences of up to five stops among fourteen eligible objectives. Each simulated step tracks elapsed time, energy, first-time weapon acquisition, cube thresholds and supply rewards. It compares walking to spending boost, excludes invalid repeats and missed deadlines, and prices the time needed to get back to the safe ring. It executes only the first choice and reconsiders it after about half a match-second or sooner if the objective disappears. V3 keeps control of close encounters, retreat and emergency zone movement. This is a resource planner, not a full match simulator or a complete rewrite in Rust.
@@ -62,7 +88,7 @@ Neither the checker nor these scenarios measure tournament placement. The naviga
 
 ## Practice comparison
 
-Practice history: `1d9e5cb` earned 3.77, `7f4965d` earned 3.88, and the team reported 3.98 for `34bbb13`. V4 is a candidate; it has not been scored here.
+Practice scores were 3.77 for `1d9e5cb`, 3.88 for `7f4965d`, 3.98 for `34bbb13` and 4.06 for V4 (`b845d48`).
 
 ## V3: routing to a region
 

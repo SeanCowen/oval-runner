@@ -76,6 +76,29 @@ def policy_checks(hello, example):
     case("opponent motion changes game aim",moving,lambda bot,act:act["aim"][0]>.04)
     case("nearby loot respects vertical reach",pickup,lambda bot,act:act.get("take")==8000)
     case("healthy mech farms an uncontested crate",crate,lambda bot,act:bot.mode=="crates" and "aim" in act)
+    def recovering_crate(obs):
+        crate(obs)
+        obs["self"].update(hp=910, cubes=1)
+
+    def cheap_upgrade(obs):
+        recovering_crate(obs)
+        obs["self"]["cubes"] = 2
+        obs["crates"][0]["hp"] = 40
+        obs["events"] = [{"type":"hit","target":1004,"amount":45}]
+
+    def loose_cube(obs):
+        recovering_crate(obs)
+        obs["cubes"] = [{"id":5001,"pos":[5,0,0]}]
+
+    def repair_offer(obs):
+        recovering_crate(obs)
+        obs["offer"] = {"choices":[{"id":"gun_mag"},{"id":"plating"},{"id":"nanites"}]}
+
+    case("active repair survives an optional crate",recovering_crate,
+         lambda bot,act:bot.mode!="crates" and not any(act["fire"]))
+    case("finish a cheap threshold cube after a hit",cheap_upgrade,lambda bot,act:bot.mode=="crates")
+    case("collect a loose cube during repair",loose_cube,lambda bot,act:bot.mode=="cubes")
+    case("wounded mech takes an offered repair upgrade",repair_offer,lambda bot,act:act["pick"]==2)
     case("uncontested supply timer held still",drop,lambda bot,act:bot.mode=="drop" and not any(act["move"]))
     case("upgrades are ranked, not index zero",lambda obs:obs.update(offer={"choices":[{"id":"gyros"},{"id":"plating"},{"id":"sensors"}]}),lambda bot,act:act["pick"]==1)
     case("laser held before charge",lambda obs:charged(obs,.2),lambda bot,act:act["fire"][1])
