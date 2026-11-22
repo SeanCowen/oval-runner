@@ -1,4 +1,5 @@
 import math
+import os
 
 import mechfight
 from strategy import Strategy
@@ -51,6 +52,60 @@ class OvalRunner:
         self.opening_cache = None
         self.last_hp_event = -math.inf
         self.saving_repair = False
+        self.collect_detours = os.getenv("OVAL_CUBE_DETOURS", "wide")
+
+    def cube_detour(self, obs, move):
+        own = obs["self"]
+        if (self.collect_detours == "0" or self.mode not in ("recover", "evade", "duel")
+                or not obs["cubes"] or not own["in_zone"] or not any(move)):
+            return move
+        rules = self.config["cubes"]
+        room = rules["stat_cap"] - own["cubes"]
+        if room <= 0:
+            return move
+        pos = own["pos"]
+        radius = .92 * rules["pickup_radius"]
+        scale = 1.65 if self.collect_detours == "wide" else 1.
+        length = 1.8 * own["stats"]["walk_speed"] * scale
+        nearby = [cube["pos"] for cube in obs["cubes"] if abs(cube["pos"][2]-pos[2]) < 3.5
+                  and radius < distance(pos,cube["pos"]) <= length]
+        if not nearby:
+            return move
+        nearby = sorted(nearby, key=lambda point: distance(pos,point))[:6]
+        if self.collect_detours == "nearest":
+            first = nearby[0]
+            if distance(pos,first) < 14 and self.arena.clear(pos,first) and future_margin(obs["zone"],obs["t"],first,2) > 3:
+                return direction(pos,first)
+            return move
+        forward = advance(pos, move, length)
+        unit = direction(pos, forward)
+        def on_segment(point):
+            along = (point[0]-pos[0])*unit[0] + (point[1]-pos[1])*unit[1]
+            return distance(point, advance(pos, unit, max(0., min(distance(pos,forward), along)))) < radius
+        natural = sum(on_segment(point) for point in nearby)
+        if natural >= min(room, len(nearby)):
+            return move
+        # A midpoint can collect two cubes whose pickup disks overlap.
+        ways = [point[:2] for point in nearby]
+        for index, first in enumerate(nearby):
+            for second in nearby[index+1:]:
+                if distance(first, second) < 2 * radius:
+                    ways.append(((first[0]+second[0])/2, (first[1]+second[1])/2))
+        best, value = None, 0.
+        thresholds = rules["upgrade_thresholds"]
+        for waypoint in ways:
+            count = sum(distance(waypoint, point) < radius for point in nearby)
+            extra = min(count, room) - min(natural, room)
+            if extra <= 0:
+                continue
+            trip = distance(pos, waypoint)
+            detour = max(0., trip + distance(waypoint, forward) - distance(pos, forward))
+            offer = any(own["cubes"]+natural < bound <= own["cubes"]+count for bound in thresholds)
+            budget = scale * min(16., 4 + 3*extra + 4*offer)
+            score = budget - detour - .12*trip
+            if score > value and future_margin(obs["zone"],obs["t"],waypoint,2) > 3 and self.arena.clear(pos,waypoint):
+                best, value = waypoint, score
+        return direction(pos, best) if best is not None else move
 
     def update_repair(self, obs):
         own = obs["self"]
@@ -382,6 +437,7 @@ class OvalRunner:
             scale = min(1,5*gap/own["stats"]["walk_speed"])
             move = tuple(value*scale for value in direction(pos,center))
             self.fast_rotation = False
+        move = self.cube_detour(obs, move)
         if now-self.anchor_time >= 1.25:
             if self.anchor and distance(self.anchor,pos) < 2.5 and any(self.last_move) and any(move) and distance(pos,goal) > 8:
                 self.router.invalidate()
