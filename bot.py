@@ -1,5 +1,6 @@
 import math
 import os
+import random
 
 import mechfight
 from strategy import Strategy
@@ -22,11 +23,29 @@ def future_margin(zone, now, point, delay):
     return radius-distance(point,center)
 
 
+def draft_scenarios():
+    # The same small set of possible futures is reused for all cards in an offer.
+    rng = random.Random(71539)
+    scenarios = []
+    for index in range(24):
+        gap = (2.0, 6.0, 11.0, 17.0)[index % 4]
+        severity = (.22, .36, .52)[index // 4 % 3]
+        stages = [(gap * rng.uniform(.45, 1.6), severity * rng.uniform(.60, 1.50),
+                   rng.choice((0., 0., .12, .24))) for _ in range(5)]
+        scenarios.append((stages, index >= 12, rng.uniform(.05, .20)))
+    return scenarios
+
+
+DRAFT_SCENARIOS = draft_scenarios()
+
+
 class OvalRunner:
     name = "Oval Runner"
 
     def __init__(self, hello, arena=None):
         self.config = hello["config"]
+        self.draft_policy = os.getenv("OVAL_DRAFT", "rollout")
+        self.draft_effects = {item["id"]: item["effects"] for item in self.config.get("upgrades", [])}
         self.arena = arena or Arena(hello["map"]["dir"], self.config["mech"])
         self.router = Router(self.arena)
         self.strategy = Strategy(self.config,self.arena)
@@ -151,8 +170,53 @@ class OvalRunner:
         if self.retreating or (own["in_zone"] and missing >= .23 * own["max_hp"]):
             order.insert(0,"nanites")
         choices = obs["offer"]["choices"]
-        return min(range(len(choices)), key=lambda index: order.index(choices[index]["id"])
-                   if choices[index]["id"] in order else len(order))
+        fallback = min(range(len(choices)), key=lambda index: order.index(choices[index]["id"])
+                       if choices[index]["id"] in order else len(order))
+        if self.draft_policy == "legacy":
+            return fallback
+        if self.draft_policy == "fixed":
+            for name in ("nanites", "armor", "plating"):
+                for index, choice in enumerate(choices):
+                    if choice["id"] == name:
+                        return index
+            return fallback
+        defensive = {"plating", "armor", "nanites"}
+        candidates = [fallback] + [index for index, choice in enumerate(choices)
+                                   if index != fallback and choice["id"] in defensive]
+        if len(candidates) == 1:
+            return fallback
+        return max(candidates, key=lambda index: self.draft_value(obs, choices[index]["id"]))
+
+    def draft_value(self, obs, card):
+        own = obs["self"]
+        stats = own["stats"]
+        capacity = own["max_hp"]
+        attributes = dict(hp=capacity, armor=stats["armor"], regen_per_s=stats["regen_per_s"],
+                          regen_delay=stats["regen_delay"])
+        for effect in self.draft_effects.get(card, ()):
+            prefix, _, key = effect["path"].partition(".")
+            if prefix == "mech" and key in attributes:
+                attributes[key] = attributes[key] * effect.get("mul", 1) + effect.get("add", 0)
+        base = self.config["mech"]["hp"]
+        horizon = max(1, min(5, obs.get("alive", 16) - 1))
+        capacity_gain = attributes["hp"] - capacity
+        useful_tempo = card not in ("plating", "armor", "nanites", "gyros", "sensors")
+        total = 0.
+        for stages, fills, tempo in DRAFT_SCENARIOS:
+            hp = own["hp"] + (capacity_gain if fills else 0.)
+            for stage, (gap, cost, storm_share) in enumerate(stages[:horizon]):
+                if stage or own["in_zone"]:
+                    recovery = max(0., gap - attributes["regen_delay"]) * attributes["regen_per_s"]
+                    hp = min(attributes["hp"], hp + recovery)
+                bill = base * cost * (storm_share + (1 - storm_share) * (1 - attributes["armor"]))
+                if useful_tempo:
+                    bill *= 1 - tempo
+                total += min(1., hp / bill)
+                hp -= bill
+                if hp <= 0:
+                    break
+            total += .25 * max(0., hp) / base
+        return total
 
     def drop_value(self, obs, drop, enemies):
         own = obs["self"]
